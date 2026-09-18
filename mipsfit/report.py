@@ -64,7 +64,7 @@ select,input,button{padding:7px;background:#202e3c;color:inherit;border:1px soli
 button.on{background:#38536b}canvas{width:100%;image-rendering:pixelated;background:#25313d}
 table{border-collapse:collapse;width:100%}td,th{text-align:left;border-bottom:1px solid #334355;padding:6px}
 th{position:sticky;top:0;background:#1d2935}.muted{color:#a8bacb}.scroll{max-height:460px;overflow:auto}
-.num{text-align:right}.tab{display:none}.tab.on{display:block}.card{background:#1a2430;border:1px solid #2d3d4d;border-radius:6px;padding:12px;margin:8px 0}
+.num{text-align:right}.tab{display:none}.tab.on{display:block}.card{background:#1a2430;border:1px solid #2d3d4d;border-radius:6px;padding:12px;margin:8px 0;overflow-wrap:anywhere}
 #tip{position:fixed;display:none;z-index:9;pointer-events:none;max-width:420px;background:#0d141b;border:1px solid #54718a;
 border-radius:5px;padding:7px 9px;font-size:13px;line-height:1.45;box-shadow:0 4px 14px #0008;overflow-wrap:anywhere}
 #tip b{color:#8fd694}#tip .k{color:#a8bacb}
@@ -92,7 +92,7 @@ const $=id=>document.getElementById(id), hex=n=>'0x'+(n>>>0).toString(16).padSta
 const units=new Map(data.units.map(u=>[u.id,u])),unitIndex=new Map(data.units.map((u,i)=>[u.id,i]));
 const relationships=data.relationships,neighbors=new Map(),functionNames=new Map();
 let cells=[],base=0,rowCount=0,pinnedUnit=null;
-for(const f of data.functions){if(!f.unit)continue;const names=functionNames.get(f.unit)||[];names.push(f.name);functionNames.set(f.unit,names)}
+for(const f of data.functions){if(!f.unit||!f.name||f.name==='??')continue;const names=functionNames.get(f.unit)||[];if(!names.includes(f.name))names.push(f.name);functionNames.set(f.unit,names)}
 for(const [a,b,weight] of relationships.edges){
  if(!neighbors.has(a))neighbors.set(a,new Map());neighbors.get(a).set(b,weight);
  if(a!==b){if(!neighbors.has(b))neighbors.set(b,new Map());neighbors.get(b).set(a,weight)}}
@@ -210,7 +210,9 @@ function slotAt(e){const r=$('cache').getBoundingClientRect();
 $('cache').onmousemove=e=>{const t=$('tip');if(!rowCount){t.style.display='none';return}
  const s=slotAt(e),u=s.unit;
  t.replaceChildren();
- t.appendChild(el('div',u?u.id:'unassigned','' ));
+ const name=u?unitName(unitIndex.get(u.id)):'unassigned';
+ t.appendChild(el('div',name));
+ if(u&&name!==u.id)t.appendChild(el('div',u.id,'k'));
  const meta=el('div',undefined,'k');
  meta.textContent=hex(s.address)+' · slot '+s.x+' · window '+s.y;
  t.appendChild(meta);

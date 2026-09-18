@@ -82,6 +82,20 @@ def _coverage(traces, index):
 
 def collect(model, graph, traces, candidates, simulation, prefix=None, limit=6):
     units = model["units"]
+    names_by_unit = {}
+    for function in model["functions"]:
+        uid, name = function.get("unit"), function["name"]
+        if uid and name and name != "??":
+            names = names_by_unit.setdefault(uid, [])
+            if name not in names:
+                names.append(name)
+
+    def unit_name(uid):
+        names = names_by_unit.get(uid, [])
+        if not names:
+            return uid.rsplit(":", 1)[-1]
+        return ", ".join(names[:3]) + (f" +{len(names) - 3} more" if len(names) > 3 else "")
+
     baseline = next(c for c in candidates if c["baseline"])
     detail = (simulation or {}).get("baseline") or {}
     conflict_per_frame = detail.get("conflict_misses", 0.0)
@@ -97,7 +111,7 @@ def collect(model, graph, traces, candidates, simulation, prefix=None, limit=6):
         peak = simulation["working_set_max"]
         share = [(u["executed_bytes"], u["id"]) for u in units if u.get("executed_bytes")]
         share.sort(reverse=True)
-        top = ", ".join(f"{uid.rsplit(':', 1)[-1]} ({n} executed bytes)" for n, uid in share[:5])
+        top = ", ".join(f"{unit_name(uid)} ({n} executed bytes)" for n, uid in share[:5])
         if peak > LINES:
             findings.append(dict(
                 kind="capacity", title=f"Peak frame touches {peak} cache lines; the cache holds {LINES}",
@@ -136,7 +150,7 @@ def collect(model, graph, traces, candidates, simulation, prefix=None, limit=6):
         offsets = {c: n * 32 for n, c in enumerate(sorted(hot_chunks, key=lambda c: graph.offset[c]))}
         whatifs.append((dict(
             kind="hot-cold-split",
-            title=f"{unit['id'].rsplit(':', 1)[-1]} spreads {executed} executed bytes over {span} bytes",
+            title=f"{unit_name(unit['id'])} spreads {executed} executed bytes over {span} bytes",
             where=unit["id"], detail=f"{cold_inside} unexecuted bytes separate hot blocks and constrain their placement. "
                                      "Only cache lines actually touched are fetched; the gaps do not all occupy the cache.",
             suggestion="Move rare paths into separate cold, noinline helpers so the hot code can be placed more compactly.",
@@ -154,7 +168,7 @@ def collect(model, graph, traces, candidates, simulation, prefix=None, limit=6):
                   else "its input section name is ambiguous or its size could not be verified")
         whatifs.append((dict(
             kind="pinned", title=f"{misses:g} misses per frame land in code the linker script cannot move",
-            where=unit["id"], detail=f"{unit['id']} runs but stays where it is: {reason}.",
+            where=unit["id"], detail=f"{unit_name(unit['id'])} runs but stays where it is: {reason}.",
             suggestion="Build that object with -ffunction-sections (and give assembly symbols .type/.size) so each "
                        "function becomes its own movable input section.",
             addresses=[unit["address"]]),
@@ -167,7 +181,7 @@ def collect(model, graph, traces, candidates, simulation, prefix=None, limit=6):
         unit = units[i]
         executed = unit.get("executed_bytes", 0)
         findings.append(dict(
-            kind="large-unit", title=f"{unit['id'].rsplit(':', 1)[-1]} is one {size}-byte block ({size // 32} cache lines)",
+            kind="large-unit", title=f"{unit_name(unit['id'])} is one {size}-byte block ({size // 32} cache lines)",
             where=unit["id"], savings=None,
             detail=f"{executed} of its bytes ran. The unit moves as a whole, which limits independent placement "
                    "of its hot blocks. Unexecuted cache lines do not compete for cache slots.",
@@ -211,7 +225,7 @@ def collect(model, graph, traces, candidates, simulation, prefix=None, limit=6):
         pairs = [p for p in entry.get("pairs", []) if p["incoming"]["unit"] and p["evicted"]["unit"]][:5]
         if not pairs:
             continue
-        rows = [f"{p['incoming']['unit'].rsplit(':', 1)[-1]} vs {p['evicted']['unit'].rsplit(':', 1)[-1]}: {p['count']:.2f} conflict misses/frame"
+        rows = [f"{unit_name(p['incoming']['unit'])} vs {unit_name(p['evicted']['unit'])}: {p['count']:.2f} conflict misses/frame"
                 for p in pairs]
         findings.append(dict(
             kind="residual", title=f"Strongest conflicts left in {entry['candidate']}", where=name, savings=None,

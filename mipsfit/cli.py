@@ -224,7 +224,7 @@ def main(argv=None):
                    help="skip all addr2line source lookups, including findings")
     p.add_argument("--candidates", type=int, default=3,
                    help="maximum alternative layouts to retain in addition to the baseline (default: 3)")
-    p.add_argument("--search-seconds", type=float, default=30.0, metavar="SECONDS",
+    p.add_argument("--search-seconds", type=float, default=120.0, metavar="SECONDS",
                    help="total hill-climbing refinement budget; 0 disables refinement (default: 30)")
     p.add_argument("--seed", type=int, default=0,
                    help="base random seed for refinement; time-limited results may vary (default: 0)")

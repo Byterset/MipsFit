@@ -25,12 +25,14 @@ and produces a self-contained HTML report showing the estimated improvements and
 MipsFit does not modify the input ELF, ROM, object files, or original linker
 script. All generated files go to the chosen output directory.
 
-## AI Disclaimer
-
-Although the codebase should be structurally sound and is based on research that I have read and confirmed with the implementation,
+> [!NOTE]
+>## AI Disclaimer
+>
+>Although the codebase should be structurally sound and is based on research that I have read and confirmed with the implementation,
 this project was written in a short time with the help of AI. 
-
-The Choice to use it lies entirely with you.
+>
+>
+>The Choice to use it lies entirely with you.
 
 ## Help
 
@@ -113,7 +115,7 @@ mipsfit analyze build/game.elf \
     --tool-prefix mips64-elf- \
     --linker-script /path/to/n64.ld \
     --trace build/gameplay.xtrace \
-    --search-seconds 60 \
+    --search-seconds 120 \
     --out build/mipsfit
 ```
 
@@ -131,7 +133,7 @@ when generating linker scripts.
 | `--trace FILE[=WEIGHT]` | No | Ares CPU trace; repeat the option to combine scenarios. Weight defaults to `1`. Without traces, MipsFit uses a less precise static call graph and the resulting analysis cannot be replayed by `simulate`. |
 | `--no-source` | No | Skips all `addr2line` source lookups, including those for findings. |
 | `--candidates N` | No | Maximum alternatives retained in addition to the baseline. Defaults to `3`; fewer may remain after duplicate layouts are removed. |
-| `--search-seconds SECONDS` | No | Total hill-climbing budget. Defaults to `30`; `0` disables refinement but retains the other placement stages. |
+| `--search-seconds SECONDS` | No | Total hill-climbing budget. Defaults to `120`; `0` disables refinement but retains the other placement stages. |
 | `--seed N` | No | Base random seed for refinement. Defaults to `0`; time-limited results may still vary. |
 | `--padding-budget BYTES` | No | Maximum explicit padding across a layout. Defaults to `0`, so placement uses reordering and cold-section spacers only. |
 | `--sim-segments SEGMENTS` | No | Approximate trace-segment budget per trace used to rank candidates, sampled in frame windows. Defaults to `0`, meaning full-trace replay. This is not a frame count. |
