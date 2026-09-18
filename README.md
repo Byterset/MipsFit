@@ -152,6 +152,20 @@ of the same size. This is a reference, not a lower bound or a prediction of
 achievable savings: replacement behavior and line packing can differ. Baseline
 summary figures are weighted averages across all supplied traces.
 
+In the **Cache map**, hover over a block for its placement-unit information.
+Click it to pin a relationship view: related units brighten by relationship
+strength, the selected unit has a white outline, and orange outlines mark
+related chunks that share a cache slot in the selected layout. A ranked list
+shows relationship weights and their conflicting portions. Hovering other
+blocks still shows their normal tooltips. Click another block to switch,
+click the selected block again to clear, or click anywhere outside the map
+to restore normal heat colouring. Escape also clears the selection.
+
+Relationships aggregate the optimizer's 32-byte chunk graph by placement unit
+(which may contain several functions). Weights describe interleaving, not call
+counts or measured cache misses. Without traces, the view is labelled as a
+static relationship estimate.
+
 ### 3. Relink with a candidate
 
 Replace the build's normal linker script with a generated candidate for one

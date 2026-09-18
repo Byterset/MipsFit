@@ -179,16 +179,13 @@ def lines(graph, base):
     return [(base[u] + offset) >> 5 for u, offset in zip(graph.unit, graph.offset)]
 
 
-def alias_cost(graph, base, top=0):
-    """Weighted interleaving between chunks that share a cache line slot while
-    holding different lines: the layout's estimated conflict misses."""
+def alias_pairs(graph, base):
+    """Yield (weight, chunk, chunk) once per edge sharing a slot, not a line."""
     line = lines(graph, base)
     slots = [[] for _ in range(LINES)]
     for c in graph.active:
         slots[line[c] & 511].append(c)
     neighbors = graph.neighbors
-    cost = 0.0
-    worst = []
     for members in slots:
         count = len(members)
         if count < 2:
@@ -203,9 +200,18 @@ def alias_cost(graph, base, top=0):
                 if line[b] != la:
                     weight = na.get(b)
                     if weight:
-                        cost += weight
-                        if top:
-                            worst.append((weight, a, b))
+                        yield weight, a, b
+
+
+def alias_cost(graph, base, top=0):
+    """Weighted interleaving between chunks that share a cache line slot while
+    holding different lines: the layout's estimated conflict misses."""
+    cost = 0.0
+    worst = []
+    for weight, a, b in alias_pairs(graph, base):
+        cost += weight
+        if top:
+            worst.append((weight, a, b))
     if not top:
         return cost, []
     return cost, [(w, a, b) for w, a, b in heapq.nlargest(top, worst)]

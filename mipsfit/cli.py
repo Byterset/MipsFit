@@ -142,7 +142,7 @@ def analyze(args):
         model["linker_script"] = dict(path=str(Path(args.linker_script).resolve()), sha256=sha256(args.linker_script))
         for name, text in generated.items():
             (out / (name + ".ld")).write_text(text, encoding="utf-8")
-    write_report(out, model, candidates, found, simulation)
+    write_report(out, model, candidates, graph, found, simulation)
     print(f"Analyzed {len(model['functions'])} functions, {sum(u['movable'] for u in model['units'])} movable units.")
     for candidate in candidates:
         cost = candidate["cost"]
