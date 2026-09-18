@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 from pathlib import Path
 import subprocess
 import sys
@@ -63,13 +64,14 @@ def annotate_units(model, traces, unit_misses, frames):
 
 
 def analyze(args):
+    if args.linker_script and not args.map:
+        raise ValueError("--linker-script requires --map")
     model = make_model(args.elf, args.tool_prefix, args.map, args.build_dir, not args.no_source)
+    script = None
     if args.linker_script:
-        # check before the search: the scripts are the point of the run, and
-        # finding out after a minute of refinement helps nobody
-        if not args.map:
-            raise ValueError("--linker-script requires --map")
         raise_unless_script_ready(model)
+        script = Path(args.linker_script).read_text(encoding="utf-8")
+        script_variant(script, model, dict(baseline=True))
     out = Path(args.out).resolve()
     out.mkdir(parents=True, exist_ok=True)
 
@@ -87,7 +89,7 @@ def analyze(args):
               f"{stats['segments']} segments")
     model["traces"] = []
 
-    graph = trg.from_traces(traces, model, frames={t["name"]: cachesim.windows(t, args.graph_segments) for t in traces}) \
+    graph = trg.from_traces(traces, frames={t["name"]: cachesim.windows(t, args.graph_segments) for t in traces}) \
         if traces else trg.from_relationships(model)
     print(f"Cost model: {graph.source}, {len(graph.active)} interleaving chunks", flush=True)
 
@@ -95,8 +97,9 @@ def analyze(args):
                                    seed=args.seed, padding_budget=args.padding_budget, sim_segments=args.sim_segments)
 
     simulation, unit_misses, replayed = {}, {}, {}
+    total_weight = sum(t["weight"] for t in traces)
     baseline = next(c for c in candidates if c["baseline"])
-    best = next((c for c in candidates if not c["baseline"]), None)
+    best = candidates[0]
     for trace in traces:
         detail = cachesim.simulate(trace, baseline["addresses"], detail=True)
         calibration = cachesim.calibrate(trace, detail)
@@ -106,34 +109,35 @@ def analyze(args):
                      attested=trace["attested"], scenario=trace["scenario"])
         model["traces"].append(entry)
         if not simulation:
-            simulation = dict(baseline=dict(misses_per_frame=round(detail["misses_per_frame"], 2),
-                                            conflict_misses=round(detail["conflict_misses"] / max(1, detail["frames"]), 2),
-                                            capacity_misses=round(detail["capacity_misses"] / max(1, detail["frames"]), 2),
-                                            first_misses=round(detail["first_misses"] / max(1, detail["frames"]), 2)),
-                              associative=round(associative["misses_per_frame"], 2),
-                              working_set=round(sum(detail["working_set"]) / max(1, len(detail["working_set"])), 1),
-                              trace=trace["name"])
-            simulation["baseline_detail"] = dict(pairs=detail["pairs"], slot_misses=detail["slot_misses"])
+            simulation = dict(baseline=dict(misses_per_frame=0.0, conflict_misses=0.0,
+                                            capacity_misses=0.0, first_misses=0.0),
+                              associative=0.0, working_set=0.0, working_set_max=0)
+        weight = trace["weight"] / total_weight
+        share = weight / max(1, detail["frames"])
+        simulation["baseline"]["misses_per_frame"] += detail["misses"] * share
+        for key in ("conflict_misses", "capacity_misses", "first_misses"):
+            simulation["baseline"][key] += detail[key] * share
+        simulation["associative"] += associative["misses_per_frame"] * weight
+        simulation["working_set"] += sum(detail["working_set"]) * share
+        simulation["working_set_max"] = max(simulation["working_set_max"], max(detail["working_set"], default=0))
         replayed[trace["name"]] = detail["frames"]
-        share = trace["weight"] / (sum(t["weight"] for t in traces) or 1.0) / max(1, detail["frames"])
         for uid, count in detail["unit_misses"].items():
             unit_misses[uid] = unit_misses.get(uid, 0.0) + count * share
-        if best:
-            after = cachesim.simulate(trace, best["addresses"], detail=True)
-            simulation.setdefault("best", {})[trace["name"]] = dict(
-                candidate=best["id"], misses_per_frame=round(after["misses_per_frame"], 2),
-                conflict_misses=round(after["conflict_misses"] / max(1, after["frames"]), 2),
-                pairs=after["pairs"][:20])
+        after = detail if best["baseline"] else cachesim.simulate(trace, best["addresses"], detail=True)
+        simulation.setdefault("best", {})[trace["name"]] = dict(
+            candidate=best["id"],
+            conflict_misses=round(after["conflict_misses"] / max(1, after["frames"]), 2),
+            pairs=[dict(p, count=p["count"] / max(1, after["frames"])) for p in after["pairs"][:20]])
         if not calibration["exact"]:
             print(f"  Note: replay of {trace['name']} differs from the emulator in "
                   f"{calibration['frames_differing']} frames (captured with the {calibration['executor']})")
 
     annotate_units(model, traces, unit_misses, replayed)
-    found = findings_module.collect(model, graph, traces, candidates, simulation, args.tool_prefix,
+    found = findings_module.collect(model, graph, traces, candidates, simulation,
+                                    None if args.no_source else args.tool_prefix,
                                     limit=args.findings) if not args.no_findings else []
 
     if args.linker_script:
-        script = Path(args.linker_script).read_text(encoding="utf-8")
         generated = {c["id"]: script_variant(script, model, c) for c in candidates}
         model["linker_script"] = dict(path=str(Path(args.linker_script).resolve()), sha256=sha256(args.linker_script))
         for name, text in generated.items():
@@ -217,18 +221,18 @@ def main(argv=None):
     p.add_argument("--trace", action="append", metavar="FILE[=WEIGHT]",
                    help="Ares CPU trace; repeatable, with an optional positive weight (default: 1; omitted: use the static call graph)")
     p.add_argument("--no-source", action="store_true",
-                   help="skip the initial addr2line lookup; combine with --no-findings to avoid all addr2line lookups")
+                   help="skip all addr2line source lookups, including findings")
     p.add_argument("--candidates", type=int, default=3,
                    help="maximum alternative layouts to retain in addition to the baseline (default: 3)")
     p.add_argument("--search-seconds", type=float, default=30.0, metavar="SECONDS",
                    help="total hill-climbing refinement budget; 0 disables refinement (default: 30)")
     p.add_argument("--seed", type=int, default=0,
-                   help="base random seed for reproducible refinement (default: 0)")
+                   help="base random seed for refinement; time-limited results may vary (default: 0)")
     p.add_argument("--padding-budget", type=int, default=0, metavar="BYTES",
                    help="maximum explicit cache-line padding across a layout; 0 disables padding (default: 0)")
-    p.add_argument("--sim-frames", dest="sim_segments", type=int, default=0,
+    p.add_argument("--sim-segments", type=int, default=0,
                    metavar="SEGMENTS",
-                   help="approximate trace-segment budget for candidate ranking; 0 replays the full trace (default: 0)")
+                   help="approximate segment budget per trace for candidate ranking, sampled in frame windows; 0 replays everything (default: 0)")
     p.add_argument("--graph-segments", type=int, default=4_000_000,
                    metavar="SEGMENTS",
                    help="approximate trace-segment budget for temporal-graph construction; 0 uses the full trace (default: 4000000)")
@@ -252,10 +256,11 @@ def main(argv=None):
     try:
         if hasattr(args, "candidates") and args.candidates < 1:
             raise ValueError("--candidates must be positive")
-        if hasattr(args, "search_seconds") and args.search_seconds < 0:
-            raise ValueError("--search-seconds must be nonnegative")
-        if hasattr(args, "padding_budget") and args.padding_budget < 0:
-            raise ValueError("--padding-budget must be nonnegative")
+        if hasattr(args, "search_seconds") and (not math.isfinite(args.search_seconds) or args.search_seconds < 0):
+            raise ValueError("--search-seconds must be finite and nonnegative")
+        for name in ("padding_budget", "sim_segments", "graph_segments", "findings"):
+            if getattr(args, name, 0) < 0:
+                raise ValueError(f"--{name.replace('_', '-')} must be nonnegative")
         args.func(args)
     except (ValueError, OSError, KeyError, subprocess.SubprocessError) as exc:
         print(f"mipsfit: {exc}", file=sys.stderr)

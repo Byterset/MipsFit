@@ -9,8 +9,8 @@ from __future__ import annotations
 from array import array
 import bisect
 from collections import defaultdict
-import hashlib
 import json
+import math
 from pathlib import Path
 import re
 import struct
@@ -35,9 +35,9 @@ def parse_spec(spec):
     try:
         value = float(weight)
     except ValueError:
-        return spec, 1.0
-    if not value > 0:
-        raise ValueError(f"trace weight must be positive: {spec}")
+        raise ValueError(f"trace weight must be a finite positive number: {spec}") from None
+    if not math.isfinite(value) or value <= 0:
+        raise ValueError(f"trace weight must be a finite positive number: {spec}")
     return path, value
 
 
@@ -47,8 +47,7 @@ def read_header(data):
     version, header_bytes, lines, flags = struct.unpack_from("<4I", data, 8)
     if version != 1 or header_bytes != HEADER_BYTES or lines != LINES:
         raise ValueError(f"unsupported CPU trace version {version}")
-    cycles, = struct.unpack_from("<Q", data, 24)
-    return dict(recompiler=bool(flags & 1), start_cycles=cycles, initial=struct.unpack_from(f"<{LINES}I", data, 32))
+    return dict(recompiler=bool(flags & 1), initial=struct.unpack_from(f"<{LINES}I", data, 32))
 
 
 def records(path, block=1 << 22):
@@ -66,14 +65,6 @@ def records(path, block=1 << 22):
             if sys.byteorder == "big":
                 words.byteswap()
             yield words
-
-
-def file_sha256(path):
-    digest = hashlib.sha256()
-    with open(path, "rb") as f:
-        for block in iter(lambda: f.read(1 << 22), b""):
-            digest.update(block)
-    return digest.hexdigest()
 
 
 class Locator:
@@ -242,10 +233,10 @@ def import_trace(model, path, name=None, weight=1.0, elf=None):
                         "use ares.setRecompiler(false) for exact calibration")
     if not frames:
         warnings.append(f"{path.name}: no frame marks; per-frame figures cover the whole capture")
-    return dict(version=1, name=name, weight=weight, source=str(path), source_sha256=file_sha256(path),
+    return dict(version=1, name=name, weight=weight, source=str(path),
                 elf_sha256=model["elf_sha256"], attested=bool(meta.get("elf_sha256")), scenario=meta.get("scenario"),
                 recompiler=header["recompiler"], units=[u["id"] for u in units],
-                fixed=fixed, initial=initial, warnings=warnings,
+                initial=initial, warnings=warnings,
                 stats=dict(raw_records=raw, segments=len(segments) // 3, unique_ranges=len(memo), instructions=instructions,
                            uncached=uncached, outside_units=unit_words[fixed], fills=fill_count, frames=len(frames),
                            truncated=truncated, control_flow_checked=checked, control_flow_consistent=consistent),

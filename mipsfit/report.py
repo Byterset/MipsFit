@@ -14,14 +14,14 @@ def write_report(out, model, candidates, findings=(), simulation=None):
 
     data = json.dumps(dict(
         functions=[dict(name=f["name"], size=f["size"], source=f["source"], unit=f.get("unit"), offset=f.get("offset", 0),
-                        address=f["address"], lines=f["cache_lines"], loops=len(f["loops"])) for f in model["functions"]],
+                        address=f["address"]) for f in model["functions"]],
         units=[dict(id=u["id"], size=u["size"], movable=u["movable"], region=u["region"], address=u["address"],
                     executed=u.get("executed_bytes", 0), instructions=u.get("executed_instructions", 0),
                     misses=u.get("misses", 0)) for u in model["units"]],
         candidates=[dict(id=c["id"], rank=c["rank"], method=c["method"], cost=c["cost"], addresses=c["addresses"],
                          conflicts=c["conflicts"]) for c in candidates],
         findings=list(findings), traces=traces, simulation=simulation or {},
-        warnings=model["warnings"], unresolved=len(model["unresolved_calls"]))).replace("<", "\\u003c")
+        warnings=model["warnings"])).replace("<", "\\u003c")
     page = '''<!doctype html><html lang="en"><meta charset="utf-8"><title>MipsFit report</title>
 <style>body{font:15px system-ui;margin:24px;background:#111820;color:#e0e8f0}h1{font-size:24px}h2{font-size:19px;margin-top:26px}p{max-width:1000px}
 select,input,button{padding:7px;background:#202e3c;color:inherit;border:1px solid #54718a;margin:4px;border-radius:4px}
@@ -38,11 +38,11 @@ border-radius:5px;padding:7px 9px;font-size:13px;line-height:1.45;box-shadow:0 4
 <div><button data-tab="summary" class="on">Summary</button><button data-tab="actions">Actions</button>
 <button data-tab="conflicts">Conflicts</button><button data-tab="functions">Functions</button><button data-tab="map">Cache map</button></div>
 <div id="summary" class="tab on"></div>
-<div id="actions" class="tab"><p class="muted">Cache problems a different order cannot fix; savings are estimates from re-planning the layout with the change applied.</p><div id="actionlist"></div></div>
+<div id="actions" class="tab"><p class="muted">Potential source/build improvements and remaining conflicts. Savings are estimates from re-planning the layout with the change applied, not measurements.</p><div id="actionlist"></div></div>
 <div id="conflicts" class="tab"><p class="muted">Strongest remaining interleaved pairs sharing a cache slot in the selected candidate.</p><div class="scroll"><table><thead><tr><th>Weight</th><th>Slot</th><th>Code A</th><th>Code B</th></tr></thead><tbody id="conflictrows"></tbody></table></div></div>
-<div id="functions" class="tab"><p class="muted">Instructions and misses are per frame, averaged over the trace, so they do not grow with a longer capture. Executed bytes is how much of the function ever ran.</p><input id="filter" placeholder="Filter function or source"><span id="count" class="muted"></span>
-<div class="scroll"><table><thead><tr><th>Function</th><th class="num">Bytes</th><th class="num">Executed bytes</th><th class="num">Instructions/frame</th><th class="num">Misses/frame</th><th class="num">Address</th><th>Source</th></tr></thead><tbody id="rows"></tbody></table></div></div>
-<div id="map" class="tab"><p class="muted">Each row is a 16 KiB window, each column one of 512 cache slots. Colour identifies the placement unit. Near-black means the trace never ran that code; everything that ran at least once is coloured, getting brighter the more it ran (log scale, so the busiest code does not wash out the rest). Vertically aligned cells compete for the same slot. Hover a cell for its owner.</p><canvas id="cache"></canvas></div>
+<div id="functions" class="tab"><p class="muted">Activity figures cover the entire placement unit and repeat for functions sharing that unit. Instructions and baseline misses are weighted per-frame averages across traces; executed bytes is the union of code reached across captures. Addresses follow the selected candidate.</p><input id="filter" placeholder="Filter function or source"><span id="count" class="muted"></span>
+<div class="scroll"><table><thead><tr><th>Function</th><th class="num">Function bytes</th><th class="num">Unit executed bytes</th><th class="num">Unit instructions/frame</th><th class="num">Unit baseline misses/frame</th><th class="num">Address</th><th>Source</th></tr></thead><tbody id="rows"></tbody></table></div></div>
+<div id="map" class="tab"><p class="muted">Each row is a 16 KiB window, each column one of 512 cache slots. Colour identifies the placement unit; brightness shows its instruction count on a log scale, not which individual lines ran. Dark units were not executed in the traces. Vertically aligned cells share a slot but conflict only when accessed. Hover for unit totals; misses refer to the baseline.</p><canvas id="cache"></canvas></div>
 <div id="tip"></div>
 <h2>Limitations</h2><ul id="warnings"></ul>
 <script>const data=DATA;
@@ -69,19 +69,19 @@ function summary(){const c=selected(),cost=c.cost,bl=data.candidates.find(x=>x.i
  d.appendChild(card);
  const sim=data.simulation||{};
  if(sim.baseline){const s=el('div',undefined,'card');
-  s.appendChild(el('div','Baseline replay'));
+  s.appendChild(el('div','Baseline replay — weighted averages across traces'));
   s.appendChild(el('div','misses/frame '+fmt(sim.baseline.misses_per_frame)+' · conflict '+fmt(sim.baseline.conflict_misses)+' · capacity '+fmt(sim.baseline.capacity_misses)+' · first touch '+fmt(sim.baseline.first_misses),'muted'));
-  if(sim.associative!==undefined)s.appendChild(el('div','A fully associative cache of the same size would miss approximately '+fmt(sim.associative)+' per frame: the gap between this and layout candidates roughly estimates what layout changes can still win.','muted'));
+  if(sim.associative!==undefined)s.appendChild(el('div','Fully associative LRU comparison: '+fmt(sim.associative)+' misses/frame. This is not a lower bound or a prediction of achievable savings. Miss classification uses the same LRU reference; initial recency is unknown, and first touches are counted since capture/reset.','muted'));
   if(sim.working_set!==undefined){const over=sim.working_set/512;
    s.appendChild(el('div','Code touched per frame: '+fmt(sim.working_set)+' distinct lines ('+fmt(sim.working_set*32/1024)+' KiB) against a 512-line, 16 KiB cache'+
-    (over>1?' — '+fmt(over)+'× over capacity, so most misses are unavoidable by reordering alone.':'.'),over>1?'bad':'muted'));}
+    (over>1?' — '+fmt(over)+'× cache capacity.':'.')+' Peak: '+fmt(sim.working_set_max)+' lines. Footprint alone does not determine capacity misses.','muted'));}
   d.appendChild(s);}
  for(const t of (data.traces||[])){const row=cost.traces&&cost.traces[t.name];if(!row)continue;
   const s=el('div',undefined,'card');s.appendChild(el('div',t.name+': '+fmt(row.misses_per_frame)+' misses/frame over '+row.frames+' frames'+(row.sampled?' (sampled)':'')));
   const cal=t.calibration||{};s.appendChild(el('div','Replay vs emulator: '+(cal.exact?'exact':(cal.frames_differing+' frames differ'))+' · captured with the '+(cal.executor||'?'),'muted'));
   d.appendChild(s);}}
 function actions(){const d=$('actionlist');d.replaceChildren();
- if(!data.findings.length){d.appendChild(el('p','No findings: the report found no code-level cache problem worth listing.','muted'));return}
+ if(!data.findings.length){d.appendChild(el('p','No findings listed; findings may have been disabled.','muted'));return}
  for(const f of data.findings){const card=el('div',undefined,'card');
   card.appendChild(el('div',f.title,'big'));
   if(f.where)card.appendChild(el('div',f.where,'muted'));

@@ -8,7 +8,7 @@ import sys
 import tempfile
 import unittest
 
-from mipsfit import cachesim, findings, optimize, trace as trace_module, trg
+from mipsfit import cachesim, optimize, trace as trace_module, trg
 from mipsfit.cli import main, relinked
 from mipsfit.elf import Elf, input_elfs
 from mipsfit.layout import actual_addresses, positions, script_variant
@@ -136,7 +136,7 @@ class CacheTests(unittest.TestCase):
         moved = positions(self.model, ["a", "b", "gap"])
         self.assertEqual(cachesim.simulate(self.trace, moved)["misses"], 2)
 
-    def test_associative_reference_is_the_floor(self):
+    def test_associative_reference_removes_alias_conflicts(self):
         baseline = positions(self.model, [u["id"] for u in self.model["units"]], baseline=True)
         self.assertEqual(cachesim.simulate_associative(self.trace, baseline)["misses"], 2)
 
@@ -167,7 +167,7 @@ class GraphTests(unittest.TestCase):
     def test_interleaving_becomes_edge_weight(self):
         trace = trace_module.import_trace(self.model, alternating_trace(self.dir / "alt.xtrace", rounds=4, frames=1),
                                           elf=NoElf())
-        graph = trg.from_traces([trace], self.model)
+        graph = trg.from_traces([trace])
         a, b = graph.ids[0 * trg.CHUNK_SPAN + (0 >> 5)], graph.ids[2 * trg.CHUNK_SPAN]
         self.assertEqual(graph.neighbors[a][b], graph.neighbors[b][a])
         self.assertGreater(graph.neighbors[a][b], 0)
@@ -180,13 +180,6 @@ class GraphTests(unittest.TestCase):
         self.assertGreater(trg.alias_cost(graph, [baseline[i] for i in ids] + [0])[0], 0)
         self.assertEqual(trg.alias_cost(graph, [moved[i] for i in ids] + [0])[0], 0)
 
-    def test_graph_survives_a_round_trip(self):
-        graph = trg.from_relationships(self.model)
-        trg.save(graph, self.dir)
-        again = trg.load(self.dir / "graph.json")
-        self.assertEqual(again.neighbors, graph.neighbors)
-        self.assertEqual(dict(again.transitions), dict(graph.transitions))
-
 
 class OptimizeTests(unittest.TestCase):
     def setUp(self):
@@ -196,7 +189,7 @@ class OptimizeTests(unittest.TestCase):
         self.trace = trace_module.import_trace(self.model, alternating_trace(self.dir / "alt.xtrace"), elf=NoElf())
 
     def generate(self, **kwargs):
-        graph = trg.from_traces([self.trace], self.model)
+        graph = trg.from_traces([self.trace])
         return optimize.generate(self.model, graph, [self.trace], search_seconds=0.2, **kwargs)
 
     def test_search_resolves_the_conflict_and_keeps_the_control(self):

@@ -32,7 +32,7 @@ class Layout:
 
     def __init__(self, model, graph):
         units = model["units"]
-        self.model, self.graph, self.units = model, graph, units
+        self.graph = graph
         self.ids = [u["id"] for u in units]
         self.size = [u["size"] for u in units]
         self.align = [max(1, u["align"]) for u in units]
@@ -319,8 +319,4 @@ def generate(model, graph, traces=(), count=3, search_seconds=30.0, seed=0, padd
     control["id"] = "baseline"
     for i, candidate in enumerate(retained):
         candidate["rank"] = i + 1
-        candidate["predicted_delta"] = dict(
-            alias=round(candidate["cost"]["alias"] - control["cost"]["alias"], 3),
-            misses_per_frame=round(candidate["cost"].get("misses_per_frame", 0)
-                                   - control["cost"].get("misses_per_frame", 0), 2) if traces else None)
     return retained

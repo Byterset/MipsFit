@@ -92,7 +92,6 @@ def function_ranges(elf):
             prev = functions[-1]
             prev["size"] = max(prev["size"], address + size - prev["address"])
             prev["names"] += names
-            prev["overlapping_symbols"] = True
         else:
             functions.append(f)
     return functions
@@ -155,12 +154,11 @@ def make_model(elf_path, prefix="mips64-elf-", map_path=None, build_dir=None, so
             safe_name = bool(re.fullmatch(r"[.a-zA-Z0-9_$]+", row["section"]))
             movable = all_inputs_read and verified and in_region and safe_name and section_counts[row["section"]] == 1
             units.append(dict(row, id=uid, align=max(alignment, 1), movable=movable, region=in_region,
-                              functions=[], verified=verified))
+                              functions=[]))
         units.sort(key=lambda u: u["address"])
         for a, b in zip(units, units[1:]):
             if a["address"] + a["size"] > b["address"]:
                 raise ValueError("overlapping map input sections; unsupported map")
-        script_ready = all_inputs_read and any(u["movable"] for u in units)
         # Validate map/symbol correspondence against the original input symbols.
         final_symbols = defaultdict(set)
         for s in elf.symbols:
@@ -181,7 +179,7 @@ def make_model(elf_path, prefix="mips64-elf-", map_path=None, build_dir=None, so
             region = f["executable_section"] == ".text" and "_start" not in f["names"]
             units.append(dict(id=f["names"][0] + f"@{f['address']:08x}", address=f["address"], size=f["size"],
                               align=32 if f["address"] % 32 == 0 else 4, movable=not f["inferred_size"],
-                              region=region, functions=[], section=None, owner=None, verified=False))
+                              region=region, functions=[], section=None, owner=None))
         warnings.append("ELF-only orders use function ranges and estimated padding; supply a map and input objects for linker scripts.")
     starts = [u["address"] for u in units]
 
@@ -191,22 +189,22 @@ def make_model(elf_path, prefix="mips64-elf-", map_path=None, build_dir=None, so
             return units[i]
         return None
 
-    relationships, unresolved = [], []
+    relationships = []
     fstarts = [f["address"] for f in functions]
 
     def find_function(address):
         i = bisect.bisect_right(fstarts, address) - 1
         return functions[i] if i >= 0 and address < functions[i]["address"] + functions[i]["size"] else None
 
-    def endpoint(address, length=4):
+    def endpoint(address):
         unit = locate(address)
         if not unit:
             return None
-        return dict(unit=unit["id"], offset=address - unit["address"], length=min(length, unit["address"] + unit["size"] - address))
+        return dict(unit=unit["id"], offset=address - unit["address"])
 
-    def connect(a, b, weight, reason, call_address):
+    def connect(a, b, weight):
         if a and b and a != b:
-            relationships.append(dict(a=a, b=b, weight=weight, reason=reason, call_address=call_address))
+            relationships.append(dict(a=a, b=b, weight=weight))
 
     for fi, f in enumerate(functions):
         unit = locate(f["address"])
@@ -217,46 +215,33 @@ def make_model(elf_path, prefix="mips64-elf-", map_path=None, build_dir=None, so
             f["unit"], f["offset"] = None, 0
             warnings.append(f"Function not covered by one map section: {f['name']}")
         flow = control_flow(elf.words(f["address"], f["size"]))
-        f.update(flow)
-        f["cache_lines"] = ((f["address"] & 31) + f["size"] + 31) // 32
-        f["cache_slots"] = sorted({((f["address"] // 32) + i) & 511 for i in range(f["cache_lines"])})
+        f["warnings"] = flow["warnings"]
         for tr in flow["transfers"]:
             pc, target = tr["address"], tr["target"]
-            if tr["kind"] in ("indirect_call", "indirect_jump"):
-                unresolved.append(dict(function=f["name"], address=pc, kind=tr["kind"]))
             is_call = tr["kind"] == "call"
             is_tail = tr["kind"] in ("jump", "branch") and target is not None and not f["address"] <= target < f["address"] + f["size"]
             if not (is_call or is_tail):
                 continue
             target_function = find_function(target)
             if not target_function:
-                unresolved.append(dict(function=f["name"], address=pc, kind="unresolved_direct", target=target))
                 continue
             block = next((b for b in flow["blocks"] if b["start"] <= pc < b["end"]), None)
             in_loop = bool(block and any(block["start"] in loop["blocks"] for loop in flow["loops"]))
             weight = 8 if in_loop else 1
-            # The first 32 bytes are a bounded entry footprint, not the whole callee.
-            entry_length = min(32, target_function["address"] + target_function["size"] - target)
-            entry = endpoint(target, entry_length)
+            # Static edges represent one chunk at each endpoint, not full ranges.
+            entry = endpoint(target)
             caller_start = max(block["start"] if block else f["address"], pc - 24)
-            connect(endpoint(caller_start, pc + 8 - caller_start), entry, weight,
-                    "loop-call" if in_loop else ("tail-call" if is_tail else "call"), pc)
+            connect(endpoint(caller_start), entry, weight)
             if is_call and pc + 8 < f["address"] + f["size"]:
-                connect(endpoint(pc + 8, min(32, f["address"] + f["size"] - pc - 8)), entry,
-                        weight, "return-continuation", pc)
+                connect(endpoint(pc + 8), entry, weight)
     if map_path:
         for unit in units:
             if any(functions[i]["inferred_size"] or functions[i]["warnings"] for i in unit["functions"]):
                 unit["movable"] = False
-    special = {s["name"]: s["address"] for s in elf.symbols if s["name"] in ("_start", "__text_start", "__intvectors_end", "__text_end", "__bss_end", "__rom_end")}
-    executable_bytes = sum(s["size"] for s in elf.executable())
-    symbol_bytes = sum(f["size"] for f in functions)
-    metrics = dict(executable_bytes=executable_bytes, symbol_range_bytes=symbol_bytes,
-                   unattributed_bytes=max(0, executable_bytes - symbol_bytes),
-                   input_section_bytes=sum(u["size"] for u in units) if map_path else None,
-                   bytes_outside_input_sections=max(0, executable_bytes - sum(u["size"] for u in units)) if map_path else None)
-    return dict(version=1, elf=str(elf_path), elf_sha256=sha256(elf_path), tool_prefix=prefix,
+        script_ready = all_inputs_read and any(u["movable"] for u in units)
+    special = {s["name"]: s["address"] for s in elf.symbols if s["name"] in ("_start", "__text_start", "__intvectors_end")}
+    return dict(version=1, elf=str(elf_path), elf_sha256=sha256(elf_path),
                 map=str(Path(map_path).resolve()) if map_path else None, build_dir=str(build_dir) if build_dir else None,
-                entry=elf.entry, special_symbols=special, executable_sections=elf.executable(),
-                functions=functions, units=units, relationships=relationships, unresolved_calls=unresolved,
-                inputs=inputs, script_ready=script_ready, warnings=warnings, metrics=metrics)
+                entry=elf.entry, special_symbols=special,
+                functions=functions, units=units, relationships=relationships,
+                inputs=inputs, script_ready=script_ready, warnings=warnings)

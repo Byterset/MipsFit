@@ -59,12 +59,20 @@ falls back to a static call graph and labels the weaker evidence accordingly.
 
 ### 1. Capture a trace
 
+
 Build Ares-64 with debug tools enabled. The trace harness is
 `mipsfit/ares/trace-scenario.js` in this repository:
 
+### Linux
 ```sh
 ares-test mipsfit/ares/trace-scenario.js \
-    build/game.z64 build/game.elf build/gameplay.xtrace 120 "GAME READY"
+    build/game.z64 build/game.elf build/gameplay.xtrace 120 "Starting Game"
+```
+
+### Windows
+```sh
+ares-test.exe "mipsfit\ares\trace-scenario.js" \ 
+    "build\game.z64" "build\gj25_cathode_quest.elf" \ "build\gameplay.xtrace" 120 "Starting Game"
 ```
 
 Arguments are `<rom> <elf> <out.xtrace> [frames] [start marker]`. The harness
@@ -99,15 +107,15 @@ when generating linker scripts.
 | `--out DIR` | Yes | Output directory for the report, analysis data, traces, and optional linker scripts. |
 | `--map FILE` | With `--linker-script` | GNU ld map used to identify and verify movable input sections. Without it, MipsFit estimates layouts from ELF function ranges and cannot generate linker scripts. |
 | `--build-dir DIR` | No | Linker's working directory, used to resolve map-relative object paths. Defaults to the ELF's grandparent directory and is ignored without `--map`. |
-| `--tool-prefix PREFIX` | No | Prefix or path for `addr2line`. Defaults to `mips64-elf-`. |
+| `--tool-prefix PREFIX` | No | Prefix or path for `addr2line`. Defaults to `mips64-elf-`. Should be in libdragon install location. |
 | `--linker-script FILE` | No | Original GNU ld script from which candidate `.ld` files are generated. Requires `--map`; when omitted, analysis still runs but writes no linker scripts. |
 | `--trace FILE[=WEIGHT]` | No | Ares CPU trace; repeat the option to combine scenarios. Weight defaults to `1`. Without traces, MipsFit uses a less precise static call graph and the resulting analysis cannot be replayed by `simulate`. |
-| `--no-source` | No | Skips the initial `addr2line` lookup. Combine with `--no-findings` to prevent findings from making best-effort source lookups. |
+| `--no-source` | No | Skips all `addr2line` source lookups, including those for findings. |
 | `--candidates N` | No | Maximum alternatives retained in addition to the baseline. Defaults to `3`; fewer may remain after duplicate layouts are removed. |
 | `--search-seconds SECONDS` | No | Total hill-climbing budget. Defaults to `30`; `0` disables refinement but retains the other placement stages. |
-| `--seed N` | No | Base random seed for reproducible refinement. Defaults to `0`. |
+| `--seed N` | No | Base random seed for refinement. Defaults to `0`; time-limited results may still vary. |
 | `--padding-budget BYTES` | No | Maximum explicit padding across a layout. Defaults to `0`, so placement uses reordering and cold-section spacers only. |
-| `--sim-frames SEGMENTS` | No | Approximate trace-segment budget used to rank candidates. Despite the option name, the value is not a frame count. Defaults to `0`, meaning full-trace replay. |
+| `--sim-segments SEGMENTS` | No | Approximate trace-segment budget per trace used to rank candidates, sampled in frame windows. Defaults to `0`, meaning full-trace replay. This is not a frame count. |
 | `--graph-segments SEGMENTS` | No | Approximate trace-segment budget for temporal-graph construction. Defaults to `4,000,000`; `0` processes the full trace. |
 | `--findings N` | No | Maximum what-if findings whose savings are estimated, not a cap on all report findings. Defaults to `6`. |
 | `--no-findings` | No | Skips actionable findings, their source attribution, and what-if replanning. |
@@ -115,15 +123,15 @@ when generating linker scripts.
 The output directory contains:
 
 - `report.html`, with candidate rankings, findings, remaining conflicts,
-  per-function figures, and a 512-slot cache map
+  function sizes, placement-unit activity figures, and a 512-slot cache map
 - `layout-01.ld` through `layout-03.ld`, plus `baseline.ld`, when a supported
   map and linker script are supplied
 - `model.json`, `candidates.json`, and trace replay data used by `simulate`
 
-The report compares the direct-mapped replay with a fully associative cache of
-the same size. The gap is roughly what layout can still improve; misses that
-remain in the associative model generally require less code per frame, code
-splitting, or other source/build changes.
+The report compares the direct-mapped replay with a fully associative LRU cache
+of the same size. This is a reference, not a lower bound or a prediction of
+achievable savings: replacement behavior and line packing can differ. Baseline
+summary figures are weighted averages across all supplied traces.
 
 ### 3. Relink with a candidate
 
@@ -198,9 +206,13 @@ search combines:
 3. Late-acceptance hill climbing to refine the section order and optional
    padding.
 
-Trace-backed candidates are ranked by exact replay through the cache model.
-The report separately identifies cold/first-touch, conflict, and capacity
-misses and suggests source or build changes where reordering is insufficient.
+Trace-backed candidates are ranked by replay through the cache model, using
+sampled windows when `--sim-segments` is nonzero. The report classifies baseline
+misses using a same-size fully associative LRU reference: first touch since
+capture/reset, conflict when the reference hits, and capacity when it misses.
+Initial LRU recency is unavailable in the trace, so early classification is
+approximate. Findings suggest source or build changes where reordering is
+insufficient.
 
 ## Development
 

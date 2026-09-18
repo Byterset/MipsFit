@@ -66,17 +66,17 @@ def _replay(seg, base, cache, start, end):
 
 class _Detail:
     def __init__(self, units):
-        self.evicted = {}
+        self.seen = set()
+        self.lru = OrderedDict()
         self.pairs = Counter()
-        self.slot_misses = [0] * LINES
         self.unit_misses = [0] * (units + 1)
-        self.fills = self.first = self.conflict = self.capacity = 0
+        self.first = self.conflict = self.capacity = 0
 
 
 def _replay_detail(seg, base, cache, owner, start, end, st, touched):
     it = iter(seg[start * 3:end * 3])
-    evicted, pairs, slot_misses, unit_misses = st.evicted, st.pairs, st.slot_misses, st.unit_misses
-    fills, first, conflict, capacity = st.fills, st.first, st.conflict, st.capacity
+    seen, lru, pairs, unit_misses = st.seen, st.lru, st.pairs, st.unit_misses
+    first, conflict, capacity = st.first, st.conflict, st.capacity
     touch = touched.add
     misses = 0
     for u, s, e in zip(it, it, it):
@@ -89,28 +89,30 @@ def _replay_detail(seg, base, cache, owner, start, end, st, touched):
             old = cache[k]
             if old != line:
                 misses += 1
-                if old >= 0:
-                    evicted[old] = fills
-                    ou = owner[k]
-                    pairs[u, (line << 5) - b, ou, (old << 5) - base[ou]] += 1
-                fills += 1
-                # ares' classification: refetched fewer than 512 fills after its
-                # eviction is a conflict miss (layout-fixable), otherwise capacity
-                previous = evicted.get(line)
-                if previous is None:
+                # Classify direct-mapped misses against a same-size LRU shadow.
+                if line not in seen:
                     first += 1
-                elif fills - previous < LINES:
+                elif line in lru:
                     conflict += 1
                 else:
                     capacity += 1
-                slot_misses[k] += 1
+                if old >= 0 and line in seen and line in lru:
+                    ou = owner[k]
+                    pairs[u, (line << 5) - b, ou, (old << 5) - base[ou]] += 1
                 unit_misses[u] += 1
                 cache[k] = line
                 owner[k] = u
+            seen.add(line)
+            if line in lru:
+                lru.move_to_end(line)
+            else:
+                lru[line] = None
+                if len(lru) > LINES:
+                    lru.popitem(last=False)
             if line >= last:
                 break
             line += 1
-    st.fills, st.first, st.conflict, st.capacity = fills, first, conflict, capacity
+    st.first, st.conflict, st.capacity = first, conflict, capacity
     return misses
 
 
@@ -136,6 +138,14 @@ def simulate(trace, addresses, frames=None, detail=False, top_pairs=40):
     for first, end, warmup in frames or [(0, len(bounds), 0)]:
         if first == 0:
             _initial(trace, base, cache, owner)
+            if detail:
+                # Initial recency is unavailable; use captured slot order, as in
+                # simulate_associative. Preloaded lines are not first touches.
+                for entry in trace["initial"]:
+                    if entry:
+                        line = (base[entry[0]] + entry[1]) >> 5
+                        st.seen.add(line)
+                        st.lru[line] = None
         else:
             cache[:], owner[:] = [-1] * LINES, [-1] * LINES
         for f in range(first, end):
@@ -143,6 +153,9 @@ def simulate(trace, addresses, frames=None, detail=False, top_pairs=40):
             for start, stop, clear in _spans(resets, *bounds[f]):
                 if clear:
                     cache[:], owner[:] = [-1] * LINES, [-1] * LINES
+                    if detail:
+                        st.seen.clear()
+                        st.lru.clear()
                 if detail:
                     n += _replay_detail(seg, base, cache, owner, start, stop, st, touched)
                 else:
@@ -161,17 +174,19 @@ def simulate(trace, addresses, frames=None, detail=False, top_pairs=40):
             return units[u] if u < len(units) else None
 
         result.update(first_misses=st.first, conflict_misses=st.conflict, capacity_misses=st.capacity,
-                      slot_misses=st.slot_misses, working_set=working_set,
+                      working_set=working_set,
                       unit_misses={units[u]: n for u, n in enumerate(st.unit_misses[:-1]) if n},
-                      outside_misses=st.unit_misses[-1],
                       pairs=[dict(incoming=dict(unit=name(a), offset=ao), evicted=dict(unit=name(b), offset=bo), count=n)
                              for (a, ao, b, bo), n in st.pairs.most_common(top_pairs)])
     return result
 
 
 def simulate_associative(trace, addresses, capacity=LINES):
-    """Fully associative LRU cache of the same size: a layout-independent
-    reference for how many misses no placement can avoid."""
+    """Same-size fully associative LRU reference at the supplied addresses.
+
+    This is a comparison, not a guaranteed lower bound: replacement policy and
+    cache-line packing can change the result. Initial recency is unknown.
+    """
     base = bases(trace, addresses)
     seg = trace["segments"]
     lru = OrderedDict()

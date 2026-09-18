@@ -10,8 +10,6 @@ from __future__ import annotations
 
 from collections import defaultdict
 import heapq
-import json
-from pathlib import Path
 
 try:  # C helper behind Counter.update; keeps the inner loop out of Python
     from collections import _count_elements
@@ -27,11 +25,10 @@ CHUNK_SPAN = 1 << 27  # chunk keys per unit: enough for absolute KSEG0 line numb
 
 
 class Graph:
-    """chunks[i] = (unit index, byte offset from the unit's base). The `fixed`
-    pseudo-unit holds code outside every placement unit, at absolute addresses."""
+    """Parallel unit/offset arrays identify each chunk. The extra pseudo-unit
+    holds code outside every placement unit, at absolute addresses."""
 
-    def __init__(self, fixed, source):
-        self.fixed = fixed
+    def __init__(self, source):
         self.source = source
         self.ids = {}
         self.unit, self.offset, self.touches, self.neighbors = [], [], [], []
@@ -67,41 +64,27 @@ class Graph:
             self.unit_chunks[self.unit[c]].append(c)
         return self
 
-    def to_json(self):
-        return dict(version=1, fixed=self.fixed, source=self.source,
-                    chunks=[[self.unit[c], self.offset[c], round(self.touches[c], 6),
-                             [[b, round(w, 6)] for b, w in sorted(self.neighbors[c].items())]]
-                            for c in range(len(self.unit))],
-                    transitions=[[a, b, round(w, 6)] for (a, b), w in sorted(self.transitions.items())])
-
-    @classmethod
-    def from_json(cls, data):
-        graph = cls(data["fixed"], data["source"])
-        for unit, offset, touches, neighbors in data["chunks"]:
-            graph.unit.append(unit)
-            graph.offset.append(offset)
-            graph.touches.append(touches)
-            graph.neighbors.append({b: w for b, w in neighbors})
-            graph.ids[unit * CHUNK_SPAN + (offset >> 5)] = len(graph.unit) - 1
-        for a, b, w in data["transitions"]:
-            graph.transitions[a, b] = w
-        return graph.finish()
-
-
 def chunk_sequence(graph, trace, frames=None):
-    """Chunk ids touched in order, consecutive repeats removed."""
+    """Chunk ids with -1 boundaries between sampled windows and at resets."""
     bounds = frame_bounds(trace)
     seg = trace["segments"]
     chunk, sequence = graph.chunk, []
     append, last = sequence.append, -1
     counted_frames = 0
-    for first, end, warmup in frames or [(0, len(bounds), 0)]:
+    resets = set(trace["resets"])
+    for first, end, _ in frames or [(0, len(bounds), 0)]:
+        append(-1)
+        last = -1
         for f in range(first, end):
-            if f - first >= warmup:
-                counted_frames += 1
+            # All sampled events contribute to the graph, including the frames
+            # used only for cache warmup by the separate candidate replay.
+            counted_frames += 1
             start, stop = bounds[f]
             it = iter(seg[start * 3:stop * 3])
-            for u, s, e in zip(it, it, it):
+            for index, (u, s, e) in enumerate(zip(it, it, it), start):
+                if index in resets:
+                    append(-1)
+                    last = -1
                 for offset in range(s >> 5 << 5, ((e - 4) >> 5 << 5) + 1, 32):
                     c = chunk(u, offset)
                     if c != last:
@@ -112,8 +95,8 @@ def chunk_sequence(graph, trace, frames=None):
 
 def _hot(sequence, coverage=0.999, minimum=2):
     counts = defaultdict(int)
-    _count_elements(counts, sequence)
-    total = len(sequence)
+    _count_elements(counts, (c for c in sequence if c >= 0))
+    total = sum(counts.values())
     keep, seen = set(), 0
     for c, n in sorted(counts.items(), key=lambda item: (-item[1], item[0])):
         if n < minimum or seen >= coverage * total:
@@ -129,6 +112,10 @@ def _temporal(graph, sequence, scale, recency=LINES):
     stack, window = [], set()
     index, insert, pop = stack.index, stack.insert, stack.pop
     for x in sequence:
+        if x < 0:
+            stack.clear()
+            window.clear()
+            continue
         if x in window:
             i = index(x)
             if i:
@@ -145,10 +132,10 @@ def _temporal(graph, sequence, scale, recency=LINES):
             graph.connect(x, y, n * scale)
 
 
-def from_traces(traces, model, frames=None, recency=LINES, coverage=0.999):
+def from_traces(traces, frames=None, recency=LINES, coverage=0.999):
     """Build the graph from imported traces. `frames` maps a trace name to the
     frame windows to sample (cachesim.windows), or None for everything."""
-    graph = Graph(len(model["units"]), "trace")
+    graph = Graph("trace")
     for trace in traces:
         sequence, counted = chunk_sequence(graph, trace, (frames or {}).get(trace["name"]))
         keep, counts = _hot(sequence, coverage)
@@ -157,7 +144,10 @@ def from_traces(traces, model, frames=None, recency=LINES, coverage=0.999):
             graph.touches[c] += n * scale
         hot, last = [], -1
         for c in sequence:
-            if c in keep and c != last:
+            if c < 0:
+                hot.append(c)
+                last = -1
+            elif c in keep and c != last:
                 hot.append(c)
                 last = c
         _temporal(graph, hot, scale, recency)
@@ -168,9 +158,8 @@ def from_traces(traces, model, frames=None, recency=LINES, coverage=0.999):
 
 
 def from_relationships(model):
-    """Static fallback: call/return edges (and imported eviction pairs) as a
-    coarse stand-in for measured interleaving."""
-    graph = Graph(len(model["units"]), "static")
+    """Static call/return edges as a coarse stand-in for measured interleaving."""
+    graph = Graph("static")
     index = {u["id"]: i for i, u in enumerate(model["units"])}
     for edge in model["relationships"]:
         ua, ub = index.get(edge["a"]["unit"]), index.get(edge["b"]["unit"])
@@ -231,12 +220,3 @@ def describe(graph, units, pairs, base):
         return dict(unit=units[u]["id"] if u < len(units) else None, offset=graph.offset[c], line=line[c])
 
     return [dict(weight=round(w, 3), a=side(a), b=side(b), slot=line[a] & 511) for w, a, b in pairs]
-
-
-def save(graph, out, name="graph.json"):
-    Path(out, name).write_text(json.dumps(graph.to_json()), encoding="utf-8")
-    return name
-
-
-def load(path):
-    return Graph.from_json(json.loads(Path(path).read_text(encoding="utf-8")))

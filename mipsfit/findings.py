@@ -9,12 +9,12 @@ indicative, not measured.
 from __future__ import annotations
 
 import copy
+import subprocess
 
 from . import optimize
 from .model import run_tool
+from .trg import LINES, alias_cost
 
-CACHE_BYTES = 16 * 1024
-LINES = 512
 
 
 def _plan_cost(lay):
@@ -50,12 +50,12 @@ def _patched(model, graph, sizes=None, offsets=None, movable=None, aligns=None):
 def _source_lines(model, prefix, addresses):
     """function at file:line for each address, in one addr2line call."""
     addresses = [a for a in dict.fromkeys(addresses)]
-    if not addresses or not prefix:
+    if not addresses or prefix is None:
         return {}
     try:
         text = run_tool(prefix, "addr2line", ["-e", model["elf"], "-f", "-C"],
                         "".join(f"0x{a:x}\n" for a in addresses)).splitlines()
-    except (ValueError, OSError):
+    except (ValueError, OSError, subprocess.SubprocessError):
         return {}
     result = {}
     for i, address in enumerate(addresses):
@@ -82,39 +82,38 @@ def _coverage(traces, index):
 
 def collect(model, graph, traces, candidates, simulation, prefix=None, limit=6):
     units = model["units"]
-    index = {u["id"]: i for i, u in enumerate(units)}
     baseline = next(c for c in candidates if c["baseline"])
-    best = next((c for c in candidates if not c["baseline"]), baseline)
     detail = (simulation or {}).get("baseline") or {}
     conflict_per_frame = detail.get("conflict_misses", 0.0)
     lay = optimize.Layout(model, graph)
     plan = _plan_cost(lay)
-    # cost -> misses/frame: the estimate and the replay measure the same thing
-    scale = (conflict_per_frame / plan) if (plan and conflict_per_frame) else 0.0
+    baseline_cost, _ = alias_cost(graph, [baseline["addresses"][u["id"]] for u in units] + [0])
+    # Calibrate the baseline replay against the graph cost of that same layout.
+    scale = conflict_per_frame / baseline_cost if baseline_cost else 0.0
     findings, whatifs = [], []
 
     working_set = (simulation or {}).get("working_set")
     if working_set:
-        share = [(u.get("executed_bytes", 0) // 32, u["id"]) for u in units if u.get("executed_bytes")]
+        peak = simulation["working_set_max"]
+        share = [(u["executed_bytes"], u["id"]) for u in units if u.get("executed_bytes")]
         share.sort(reverse=True)
-        top = ", ".join(f"{uid.rsplit(':', 1)[-1]} ({n} lines)" for n, uid in share[:5])
-        if working_set > LINES:
+        top = ", ".join(f"{uid.rsplit(':', 1)[-1]} ({n} executed bytes)" for n, uid in share[:5])
+        if peak > LINES:
             findings.append(dict(
-                kind="capacity", title=f"Per frame the game runs through {working_set:.0f} cache lines, "
-                                       f"{working_set / LINES:.1f}x what the 16 KiB cache holds",
-                where="whole frame", savings=None,
-                detail=f"A fully associative cache of the same size would still miss "
-                       f"{(simulation or {}).get('associative', 0):g} times per frame, so most of the remaining misses "
-                       f"need less code per frame, not a different order.",
-                suggestion="Shrink or split the biggest per-frame contributors, or run less code per frame.",
-                sources=[f"Largest executed footprints: {top}"]))
+                kind="capacity", title=f"Peak frame touches {peak} cache lines; the cache holds {LINES}",
+                where="all captured scenarios", savings=None,
+                detail=f"The weighted average is {working_set:.1f} lines per frame. This indicates a large footprint, "
+                       "but reuse order determines capacity misses; frame size alone does not say how many misses layout can fix.",
+                suggestion="Use the capacity-miss figures to judge whether reducing executed code would help.",
+                sources=[f"Largest coverage across captures: {top}"]))
         else:
             findings.append(dict(
-                kind="capacity", title=f"The per-frame working set ({working_set:.0f} lines) fits in the cache",
-                where="whole frame", savings=None,
-                detail="Every remaining miss is a conflict: two pieces of code competing for one slot, which the layout can fix.",
-                suggestion="No code change needed for capacity; let the placement search do the work.",
-                sources=[f"Largest executed footprints: {top}"]))
+                kind="capacity", title=f"Peak frame touches {peak} lines, within the {LINES}-line cache size",
+                where="all captured scenarios", savings=None,
+                detail="Each observed frame fits by line count. First touches and reuse across frames can still miss, "
+                       "and fixed sections can prevent layout from eliminating conflicts.",
+                suggestion="Compare replayed layouts and the miss breakdown before deciding on code changes.",
+                sources=[f"Largest coverage across captures: {top}"]))
 
     # --- hot functions carrying cold code -----------------------------------
     mixed = []
@@ -138,10 +137,9 @@ def collect(model, graph, traces, candidates, simulation, prefix=None, limit=6):
         whatifs.append((dict(
             kind="hot-cold-split",
             title=f"{unit['id'].rsplit(':', 1)[-1]} spreads {executed} executed bytes over {span} bytes",
-            where=unit["id"], detail=f"{cold_inside} bytes inside the executed span never ran in the traces, so they take "
-                                     f"{cold_inside // 32} cache lines with them whenever the hot parts are fetched.",
-            suggestion="Mark the rare paths [[unlikely]] / __attribute__((cold, noinline)), or build this file with "
-                       "-freorder-blocks-and-partition so GCC moves them to .text.unlikely.*",
+            where=unit["id"], detail=f"{cold_inside} unexecuted bytes separate hot blocks and constrain their placement. "
+                                     "Only cache lines actually touched are fetched; the gaps do not all occupy the cache.",
+            suggestion="Move rare paths into separate cold, noinline helpers so the hot code can be placed more compactly.",
             addresses=[unit["address"] + spans[k][1] for k in range(min(3, len(spans) - 1))]),
             dict(sizes={i: max(32, len(hot_chunks) * 32)}, offsets=offsets)))
 
@@ -165,34 +163,39 @@ def collect(model, graph, traces, candidates, simulation, prefix=None, limit=6):
     # --- large hot units ----------------------------------------------------
     large = sorted(((u.get("executed_instructions", 0), u["size"], i) for i, u in enumerate(units)
                     if u["size"] >= 4096 and u.get("executed_bytes")), reverse=True)
-    for instructions, size, i in large[:2]:
+    for _, size, i in large[:2]:
         unit = units[i]
         executed = unit.get("executed_bytes", 0)
         findings.append(dict(
             kind="large-unit", title=f"{unit['id'].rsplit(':', 1)[-1]} is one {size}-byte block ({size // 32} cache lines)",
             where=unit["id"], savings=None,
-            detail=f"{executed} of its bytes ran. A unit moves as a whole, so its cold half keeps competing for slots "
-                   f"with everything else.",
+            detail=f"{executed} of its bytes ran. The unit moves as a whole, which limits independent placement "
+                   "of its hot blocks. Unexecuted cache lines do not compete for cache slots.",
             suggestion="Split it into smaller functions, or keep rarely used branches in separate noinline helpers.",
             sources=[]))
 
     # --- alignment waste in hot code ----------------------------------------
-    waste = sum(optimize.align(u["size"], u["align"]) - u["size"]
-                for u in units if u.get("executed_bytes") and u["align"] >= 32)
+    hot_small = {i for i, u in enumerate(units)
+                 if u.get("executed_bytes") and u["align"] >= 32 and u["size"] < 256}
+    waste = 0
+    for i in hot_small:
+        if i and units[i - 1].get("output") == units[i].get("output") == ".text":
+            end = units[i - 1]["address"] + units[i - 1]["size"]
+            if optimize.align(end, units[i]["align"]) == units[i]["address"]:
+                waste += units[i]["address"] - end
     if waste >= 1024:
-        hot_small = {i for i, u in enumerate(units) if u.get("executed_bytes") and u["align"] >= 32 and u["size"] < 256}
         whatifs.append((dict(
-            kind="alignment", title=f"{waste} bytes of -falign-functions=32 padding sit inside executed code",
-            where="hot functions", detail=f"That is {waste // 32} cache lines of padding fetched along with the code "
-                                          f"around it.",
+            kind="alignment", title=f"{waste} bytes of alignment gaps precede small hot sections",
+            where="hot sections", detail="These gaps spread code across addresses. They need not be fetched, "
+                                          "but relaxing alignment can change cache-line packing and slot conflicts.",
             suggestion="For the hottest small functions, relax -falign-functions for that translation unit and measure.",
             addresses=[]),
             dict(aligns={i: 4 for i in hot_small})))
 
     # --- estimate savings by re-planning ------------------------------------
-    for description, change in whatifs[:limit]:
+    for index, (description, change) in enumerate(whatifs):
         savings = None
-        if change and scale:
+        if index < limit and change and scale:
             try:
                 modified = _plan_cost(_patched(model, graph, **change))
                 savings = round(max(0.0, plan - modified) * scale, 2)
@@ -204,11 +207,11 @@ def collect(model, graph, traces, candidates, simulation, prefix=None, limit=6):
 
     # --- what is left after the best layout ---------------------------------
     remaining = ((simulation or {}).get("best") or {})
-    for name, entry in list(remaining.items())[:1]:
+    for name, entry in remaining.items():
         pairs = [p for p in entry.get("pairs", []) if p["incoming"]["unit"] and p["evicted"]["unit"]][:5]
         if not pairs:
             continue
-        rows = [f"{p['incoming']['unit'].rsplit(':', 1)[-1]} vs {p['evicted']['unit'].rsplit(':', 1)[-1]}: {p['count']} misses"
+        rows = [f"{p['incoming']['unit'].rsplit(':', 1)[-1]} vs {p['evicted']['unit'].rsplit(':', 1)[-1]}: {p['count']:.2f} conflict misses/frame"
                 for p in pairs]
         findings.append(dict(
             kind="residual", title=f"Strongest conflicts left in {entry['candidate']}", where=name, savings=None,
