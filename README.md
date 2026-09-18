@@ -1,5 +1,13 @@
 # MipsFit
 
+<p align="center">
+  <img src="./images/report_actions.png" width="355">&nbsp;&nbsp;&nbsp;&nbsp;
+  <img src="./images/report_cache_map.png" width="300">
+</p>
+<p align="center">
+  <img src="./images/report_summary.png" width="450">
+</p>
+
 MipsFit is a code-layout optimizer for Nintendo 64 homebrew. 
 It reorders independently linkable code sections to reduce conflict misses in the
 VR4300's 16 KiB, direct-mapped instruction cache.
@@ -16,6 +24,10 @@ and produces a self-contained HTML report showing the estimated improvements and
 
 MipsFit does not modify the input ELF, ROM, object files, or original linker
 script. All generated files go to the chosen output directory.
+
+## Help
+
+You can contact me via the N64brew Discord
 
 ## Requirements
 
