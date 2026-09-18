@@ -72,7 +72,7 @@ border-radius:5px;padding:7px 9px;font-size:13px;line-height:1.45;box-shadow:0 4
 #mapLegend{max-width:none}.selection-key{color:#fff}.conflict-key{color:#ffb454}
 .big{font-size:22px}.win{color:#8fd694}.bad{color:#e88}</style>
 <h1>MipsFit code layout report</h1>
-<label>Candidate <select id="candidate"></select></label><span id="score" class="muted"></span>
+<label id="candidateControl">Candidate <select id="candidate"></select></label><span id="score" class="muted"></span>
 <div><button data-tab="summary" class="on">Summary</button><button data-tab="actions">Actions</button>
 <button data-tab="conflicts">Conflicts</button><button data-tab="functions">Functions</button><button data-tab="map">Cache map</button></div>
 <div id="summary" class="tab on"></div>
@@ -80,7 +80,7 @@ border-radius:5px;padding:7px 9px;font-size:13px;line-height:1.45;box-shadow:0 4
 <div id="conflicts" class="tab"><p class="muted">Strongest remaining interleaved pairs sharing a cache slot in the selected candidate.</p><div class="scroll"><table><thead><tr><th>Weight</th><th>Slot</th><th>Code A</th><th>Code B</th></tr></thead><tbody id="conflictrows"></tbody></table></div></div>
 <div id="functions" class="tab"><p class="muted">Activity figures cover the entire placement unit and repeat for functions sharing that unit. Instructions and baseline misses are weighted per-frame averages across traces; executed bytes is the union of code reached across captures. Addresses follow the selected candidate.</p><input id="filter" placeholder="Filter function or source"><span id="count" class="muted"></span>
 <div class="scroll"><table><thead><tr><th>Function</th><th class="num">Function bytes</th><th class="num">Unit executed bytes</th><th class="num">Unit instructions/frame</th><th class="num">Unit baseline misses/frame</th><th class="num">Address</th><th>Source</th></tr></thead><tbody id="rows"></tbody></table></div></div>
-<div id="map" class="tab"><p class="muted">Each row is a 16 KiB window, each column one of 512 cache slots. Colours identify placement units, which may contain multiple functions. Hover for unit totals; misses refer to the baseline. Click a block to show its relationships, or another block to switch. Click the selected block again or anywhere outside the map to restore normal heat.</p>
+<div id="map" class="tab"><p class="muted">Each row is a 16 KiB window, each column one of 512 cache slots. Colours identify placement units, which may contain multiple functions. Hover for unit totals; misses refer to the baseline. Click a block to show its relationships, or another block to switch. The Candidate dropdown preserves the selection and updates conflicts for that layout. Click the selected block again or elsewhere outside the map to restore normal heat.</p>
 <canvas id="cache" role="img" aria-label="Code placement by cache slot; click a block to select its relationships"></canvas>
 <p id="mapLegend" class="muted" aria-live="polite"></p>
 <div id="relationships" hidden><h2 id="relationshipTitle"></h2><p id="relationshipNote" class="muted"></p>
@@ -230,7 +230,7 @@ $('cache').onmouseleave=()=>{$('tip').style.display='none'};
 // Hover only updates the tooltip. A click is the only way to pin or switch a unit.
 $('cache').onclick=e=>{if(!rowCount)return;const u=slotAt(e).unit;if(!u)return;
  const index=unitIndex.get(u.id);pinnedUnit=pinnedUnit===index?null:index;drawMap()};
-document.addEventListener('click',e=>{if(e.target!==$('cache')&&pinnedUnit!==null){pinnedUnit=null;drawMap()}});
+document.addEventListener('click',e=>{if(e.target!==$('cache')&&!$('candidateControl').contains(e.target)&&pinnedUnit!==null){pinnedUnit=null;drawMap()}});
 document.addEventListener('keydown',e=>{if(e.key==='Escape'&&pinnedUnit!==null){pinnedUnit=null;drawMap()}});
 function render(){const c=selected();
  $('score').textContent=c.cost.misses_per_frame!==undefined?fmt(c.cost.misses_per_frame)+' simulated misses/frame':fmt(c.cost.alias)+' estimated conflict cost';

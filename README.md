@@ -160,8 +160,10 @@ strength, the selected unit has a white outline, and orange outlines mark
 related chunks that share a cache slot in the selected layout. A ranked list
 shows relationship weights and their conflicting portions. Hovering other
 blocks still shows their normal tooltips. Click another block to switch,
-click the selected block again to clear, or click anywhere outside the map
-to restore normal heat colouring. Escape also clears the selection.
+click the selected block again to clear, or click elsewhere outside the map
+to restore normal heat colouring. The Candidate dropdown preserves the selected
+unit and updates its conflict highlighting and weights for the new layout.
+Escape also clears the selection.
 
 Relationships aggregate the optimizer's 32-byte chunk graph by placement unit
 (which may contain several functions). Weights describe interleaving, not call
