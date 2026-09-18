@@ -25,6 +25,13 @@ and produces a self-contained HTML report showing the estimated improvements and
 MipsFit does not modify the input ELF, ROM, object files, or original linker
 script. All generated files go to the chosen output directory.
 
+## AI Disclaimer
+
+Although the codebase should be structurally sound and is based on research that I have read and confirmed with the implementation,
+this project was written in a short time with the help of AI. 
+
+The Choice to use it lies entirely with you.
+
 ## Help
 
 You can contact me via the N64brew Discord
