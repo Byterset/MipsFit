@@ -20,6 +20,7 @@ from .elf import Elf
 from .mips import transfer
 
 MAGIC = b"P64XTRC1"
+IMPORTED_VERSION = 2
 LINES = 512
 HEADER_BYTES = 8 + 4 * 4 + 8 + 4 * LINES
 RANGE, FRAME, FILL, UNCACHED, RESET, TOTALS = 0, 1, 2, 3, 4, 15
@@ -129,9 +130,7 @@ def import_trace(model, path, name=None, weight=1.0, elf=None):
     memo, end_ok, totals = {}, {}, {}
     unit_words = [0] * (fixed + 1)
     transitions = defaultdict(int)
-    align32 = [u["align"] >= 32 for u in units] + [True]
     instructions = uncached = raw = fill_count = checked = consistent = 0
-    lu = ls = le = -1
     prev_unit = -1
     pending_end = 0
     split, extend = loc.split, segments.extend
@@ -159,22 +158,19 @@ def import_trace(model, path, name=None, weight=1.0, elf=None):
                     parts = memo[key] = split(a, b)
                 for u, s, e in parts:
                     unit_words[u] += count * ((e - s) >> 2)
-                    if u != prev_unit:
-                        if prev_unit >= 0 and prev_unit != fixed and u != fixed:
-                            transitions[prev_unit << 16 | u] += 1
-                        prev_unit = u
-                    # A range whose lines the previous one just touched cannot miss,
-                    # whatever the layout (32-byte-aligned units keep their line grid).
-                    if u == lu and ((ls <= s and e <= le) or
-                                    (align32[u] and s >> 5 >= ls >> 5 and (e - 4) >> 5 <= (le - 4) >> 5)):
-                        continue
-                    extend((u, s, e))
-                    lu, ls, le = u, s, e
+                # Keep every visit for relocated misses, LRU order and frame coverage.
+                for _ in range(count):
+                    for u, s, e in parts:
+                        if u != prev_unit:
+                            if prev_unit >= 0 and prev_unit != fixed and u != fixed:
+                                transitions[prev_unit << 16 | u] += 1
+                            prev_unit = u
+                        extend((u, s, e))
             elif kind == FILL:
                 fills.append(len(segments) // 3)
                 fills.append(a)
                 fill_count += 1
-                lu, pending_end = -1, 0
+                pending_end = 0
             elif kind == FRAME:
                 frames.append(len(segments) // 3)
                 pending_end = 0
@@ -183,7 +179,7 @@ def import_trace(model, path, name=None, weight=1.0, elf=None):
                 pending_end = 0
             elif kind == RESET:
                 resets.append(len(segments) // 3)
-                lu, prev_unit, pending_end = -1, -1, 0
+                prev_unit, pending_end = -1, 0
             elif kind == TOTALS:
                 totals[t & 0xF] = (a, b)
             else:
@@ -233,7 +229,7 @@ def import_trace(model, path, name=None, weight=1.0, elf=None):
                         "use ares.setRecompiler(false) for exact calibration")
     if not frames:
         warnings.append(f"{path.name}: no frame marks; per-frame figures cover the whole capture")
-    return dict(version=1, name=name, weight=weight, source=str(path),
+    return dict(version=IMPORTED_VERSION, name=name, weight=weight, source=str(path),
                 elf_sha256=model["elf_sha256"], attested=bool(meta.get("elf_sha256")), scenario=meta.get("scenario"),
                 recompiler=header["recompiler"], units=[u["id"] for u in units],
                 initial=initial, warnings=warnings,
@@ -265,6 +261,8 @@ def save(trace, out):
 def load(path):
     path = Path(path)
     trace = json.loads(path.read_text(encoding="utf-8"))
+    if trace.get("version") != IMPORTED_VERSION:
+        raise ValueError(f"{path.name}: incompatible imported trace; rerun analyze with the original .xtrace capture")
     with open(path.parent / trace.pop("data"), "rb") as f:
         for key, length in trace.pop("arrays").items():
             data = array("I")
